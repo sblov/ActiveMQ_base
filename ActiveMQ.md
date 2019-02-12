@@ -101,7 +101,11 @@ lov@lov:/opt/apache-activemq-5.15.8/bin$ ./activemq stop
 
 ## 四、应用
 
-### PTP模型
+### PTP处理模式
+
+​	消息生产者生产消息发送到queue中，然后消息消费者从queue】中获取 并且消费消息。消息被消费后，queue中就不再存储，所以消息消费者不可能消费到已经被消费的消息
+
+​	Queue支持存在多个消费者，但是对于一个消息而言，只会有一个消费者可以消费，其他的则不能消费该消息。当消费者不存在时，消息会一直保存直到有消费消息
 
 #### 主动消费
 
@@ -323,7 +327,177 @@ public class TextConsumer {
 
 #### 观察者消费
 
-### PUB&SUB模型
+ConsumerListener
+
+```java
+/*
+ * 使用监听器的方式，实现消息的处理
+ */
+public class ConsumerListener {
+
+	
+	/**
+	 * 处理消息
+	 */
+	public void consumMessage(){
+		
+		ConnectionFactory factory =null;
+		Connection connection = null;
+		Session session =null;
+		Destination destination = null;
+		MessageConsumer consumer = null;
+		
+		try {
+			factory = new ActiveMQConnectionFactory("admin", "admin", "tcp://localhost:61616");
+			connection = factory.createConnection();
+			
+			connection.start();
+			session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+			destination = session.createQueue("test-listener");
+			consumer = session.createConsumer(destination);
+			
+			//注册监听器，注册成功后，队列中的消息变化会自动触发监听器代码。接收消息并处理
+			consumer.setMessageListener(message->{
+				/*
+				 * 监听器一旦注册，永久有效
+				 * 永久-consumer线程不关闭
+				 * 处理消息的方式：只要有消息未处理，自动调用该方法，处理消息
+				 * 监听器可以注册多个，注册多个监听器，相当于集群
+				 * ActiveMQ自动循环调用多个监听器，处理队列中的消息，实现并行处理
+				 */
+				
+				Object data;
+				try {
+					//acknowledge方法，确认方法。代表consumer已经收到消息，确认后，MQ删除对应的消息
+					message.acknowledge();
+					ObjectMessage om = (ObjectMessage) message;
+					data = om.getObject();
+					System.out.println(data);
+				} catch (JMSException e) {
+					e.printStackTrace();
+				}
+			});
+			
+			//阻塞当前代码，保证listener代码未结束。如果代码结束，监听器自动关闭
+			System.in.read();
+		} catch (JMSException e) {
+			
+			e.printStackTrace();
+		} catch (IOException e) {
+
+			e.printStackTrace();
+		}finally {
+			if (consumer != null) {
+				try {
+					consumer.close();
+				} catch (JMSException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+			if (session != null) {
+				try {
+					session.close();
+				} catch (JMSException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+			if (connection != null) {
+				try {
+					connection.close();
+				} catch (JMSException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+		}
+		
+		
+	}
+	
+	public static void main(String[] args) {
+		
+		new ConsumerListener().consumMessage();
+		
+	}
+	
+}
+```
+
+ObjectProducer
+
+```java
+public class ObjectProducer {
+
+	public void sendMessage(){
+		ConnectionFactory factory = null;
+		Connection connection = null;
+		Session session = null;
+		Destination destination = null;
+		MessageProducer producer = null;
+		Message message = null;
+		
+		try {
+			factory = new ActiveMQConnectionFactory("admin", "admin", "tcp://localhost:61616");
+			connection = factory.createConnection();
+			connection.start();
+			session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+			destination = session.createQueue("test-listener");
+			producer = session.createProducer(destination);
+			connection.start();
+			
+			for (int i = 0; i < 100; i++) {
+				Integer data = i;
+				message = session.createObjectMessage(data);
+				producer.send(message);
+			}
+		} catch (JMSException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}finally {
+			if (producer != null) {
+				try {
+					producer.close();
+				} catch (JMSException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+			if (session != null) {
+				try {
+					session.close();
+				} catch (JMSException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+			if (connection != null) {
+				try {
+					connection.close();
+				} catch (JMSException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+		}
+		
+	}
+	
+	public static void main(String[] args) {
+		
+		new ObjectProducer().sendMessage();
+	}
+	
+}
+
+```
+
+​	开启两个consumerlistener监听器，producer发送0-99的数，监听器获取处理，查看两个监听器的console输出
+
+![](img/p2p.png)
+
+### PUB&SUB处理模式
 
 ## 五、安全认证
 
