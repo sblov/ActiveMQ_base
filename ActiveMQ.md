@@ -499,6 +499,146 @@ public class ObjectProducer {
 
 ### PUB&SUB处理模式
 
+​	消息生产者（发布）将消息发布到topic中，同时有多个消息消费者（订阅）消费该消息。与点对点不同，发布到topic的消息会被所有订阅者消费；当生产者发布消息，不管是否有消费者，都不会保存消息
+
+```java
+	//其他代码如上，关键将Queue改为Topic
+	destination = session.createTopic("test-topic");
+```
+
+![](img/topic.png)
+
+### PTP&PUS/SUB对比
+
+|                  | Topic                                                        | Queue                                                        |
+| ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| 概要             | public subscribe messaging发布订阅消息                       | Point-to-Point点对点                                         |
+| 有无状态         | topic数据不保存，是无状态的                                  | Queue数据默认会在mq服务器上以文件形式保存，比如ActiveMQ一般保存在$AMQ_HOME/data/kahadb中，也可以配置DB存储 |
+| 完整性保障       | 并不保证publisher发布的每条数据，Subscriber都能接收到        | Queue保证每条数据都能被receiver接收，消息不超时              |
+| 消息是否会丢失   | 一般publisher发布消息到某个topic时，只有正在监听该topic地址的sub能接收到消息 | sender发送消息到目标queue，receiver可以异步接收。queue上的消息如果暂时没有receiver接收，在不超时下，不会丢失 |
+| 消息发布接收策略 | 一对多的消息发布接收策略。监听同一个topic地址的多个sub都能收到publisher发送的消息。sub接收玩通知mq服务器 | 一对一的消息发送接收策略，一个sender发送的消息，只能有一个receiver接收，receiver接收完后，通知mq服务器已接收，mq服务器对queue里的消息采取删除或其他操作 |
+
 ## 五、安全认证
 
+​	ActiveMQ也提供安全认证，就是用户名密码登录规则。ActiveMQ如果需要使用安全认证的话，必须在Activemq的核心配置文件中开启安全配置。配置文件就是`conf/activemq.xml`
+
+在	`conf/activemq.xml`文件的==broker 标签==中插入子标签：
+
+```xml
+<plugins>
+            <!--  use JAAS to authenticate using the login.config file on the classpath to configure JAAS  -->
+            <!-- 指定了使用JAAS插件管理权限，至于configuration="activemq"是在login.conf文件里定义的 -->
+            <jaasAuthenticationPlugin configuration="activemq" />
+            <authorizationPlugin>
+                <!-- 应用插件的内容信息 -->
+                <map>
+                    <authorizationMap>
+                        <authorizationEntries>
+                        	<!-- 指定了具体的Topic/Queue与用户组的授权关系 -->
+                            <authorizationEntry topic=">" read="admins" write="admins" admin="admins" />
+                            <!-- ‘>’ 相当于 java中的 ‘*’ -->
+                            <authorizationEntry queue=">" read="admins" write="admins" admin="admins" />
+                            authorizationEntry topic="FirstTopic" read="smeall,smeadmin" write="smeadmin" admin="smeall,smeadmin" /
+                            <!-- 必须配置 -->
+                            <authorizationEntry topic="ActiveMQ.Advisory.>" read="admins" write="admins" admin="admins"/>
+                            <authorizationEntry queue="ActiveMQ.Advisory.>" read="admins" write="admins" admin="admins"/>
+                        </authorizationEntries>
+                    </authorizationMap>
+                </map>
+            </authorizationPlugin>
+        </plugins>
+```
+
+`conf/login.config`：开启认证后，认证使用的用户信息由其他配置文件提供
+
+```properties
+activemq {
+    org.apache.activemq.jaas.PropertiesLoginModule required
+        org.apache.activemq.jaas.properties.user="users.properties"
+        org.apache.activemq.jaas.properties.group="groups.properties";
+};
+```
+
+`conf/groups.properties`
+
+```properties
+#组 = 用户 ， 用户 
+admins=admin
+```
+
+`conf/users.properties`
+
+```properties
+#用户名 = 密码
+admin=admin
+```
+
+​	如：
+
+```java
+factory = new ActiveMQConnectionFactory("admin", "admin", "tcp://localhost:61616"); //必须是在制定的组下的用户与对应密码
+```
+
 ## 六、持久化
+
+​	ActiveMQ中，持久化是指对消息数据的持久化。ActiveMQ中，默认的消息是保存在内存中的。当内存容量不足时，或ActiveMQ正常关闭时，会将内存中的未处理的消息持久化到磁盘中。具体的持久化策略由配置文件中的具体配置决定。
+
+​	ActiveMQ的默认存储策略是kahadb，如果使用JDBC作为持久化策略，则会将所以需要持久化的消息保存到数据库中
+
+​	所以的持久化配置都在`conf/activemq.xml`中配置，配置信息都在broker标签内部定义。
+
+### kahadb方式
+
+​	ActiveMQ默认的持久化策略。kahadb是一个文件型数据库。是使用内存+文件保证数据的持久化。kahadb可以限制每个数据文件的大小。不代表总计数据容量。
+
+​	KahaDb恢复时间远远小于其前身AMQ并且使用更少的数据文件，所以可以完全代替AMQ。 kahaDB的持久化机制同样是基于日志文件，索引和缓存。 
+
+```xml
+<persistenceAdapter>
+    <!-- directory：保存数据的目录；journalMaxFileLength：保存消息的文件大小 -->
+   <kahaDB directory="${activemq.data}/kahadb" journalMaxFileLength="16mb" />
+</persistenceAdapter>
+```
+
+> 特性：
+>
+> ​	1、日志形式存储消息；
+>
+> ​	2、消息索引以B-Tree结构存储；
+>
+> ​	3、可以快速更新；
+>
+> ​	4、完全支持JMS事务；
+>
+> ​	5、支持多种恢复机制
+
+### AMQ方式
+
+​	性能高于JDBC，写入消息时，会将消息写入日志文件，由于是顺序追加写，性能很高。为了提升性能，创建消息主键索引，并且提供缓存机制，进一步提升性能。每个日志文件的大小都是有限制的（默认32m，可自行配置）。 当超过这个大小，系统会重新建立一个文件。当所有的消息都消费完成，系统会删除这个文件或者归档（取决于配置）。 主要的缺点是AMQ Message会为每一个Destination创建一个索引，如果使用了大量的Queue，索引文件的大小会占用很多磁盘空间。 而且由于索引巨大，一旦Broker崩溃，重建索引的速度会非常慢。 
+
+```xml
+<persistenceAdapter>
+    <!-- directory：保存数据的目录；maxFileLength：保存消息的文件大小 -->
+   <amqPersistenceAdapter directory="${activemq.data}/amq" maxFileLength="32mb" />
+</persistenceAdapter>
+```
+
+​	虽然AMQ性能略高于下面的Kaha DB方式，但是由于其重建索引时间过长，而且索引文件占用磁盘空间过大，所以已经不推荐使用。 
+
+### JDBC持久化方式
+
+### LevelDB方式
+
+​	从ActiveMQ 5.6版本之后，又推出了LevelDB的持久化引擎。
+	目前默认的持久化方式仍然是KahaDB，不过LevelDB持久化性能高于KahaDB，可能是以后的趋势。
+	在ActiveMQ 5.9版本提供了基于LevelDB和Zookeeper的数据复制方式，用于Master-slave方式的首选数据复制方案。
+
+## 七、API
+
+### Producer API
+
+### Consumer API
+
+## 八、SpringActiveMQ
+
+## 九、集群
