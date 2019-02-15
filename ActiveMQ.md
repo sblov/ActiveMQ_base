@@ -627,6 +627,76 @@ factory = new ActiveMQConnectionFactory("admin", "admin", "tcp://localhost:61616
 
 ### JDBC持久化方式
 
+​	ActiveMQ将数据持久化到数据库中。不指定具体的数据库。可以使用任意的数据库。
+
+**修改activemq.xml:**
+
+```xml
+ <broker>
+     .............
+     	<!-- 定义一个mysql-ds的mysql数据源，然后在persistenceAdapter节点中配置jdbcPersistenceAdapter并引用刚定义的数据源。 -->
+        <persistenceAdapter>
+            <!-- dataSource制定持久化数据库的bean，createTablesOnStartup是否在启动时创建数据表，默认值为true，这样每次启动都会去创建表，一般在第一启动设置，之后改为false -->
+            <jdbcPersistenceAdapter  dataSource="#mysql-ds"  createTablesOnStartup="false"></jdbcPersistenceAdapter>
+        </persistenceAdapter>
+   	.................
+ </broker>
+<!-- broker标签外，设置该bean -->
+ <bean id="mysql-ds" class="org.apache.commons.dbcp.BasicDataSource" destroy-method="close">  
+      <property name="driverClassName" value="com.mysql.jdbc.Driver"/>  
+      <property name="url" value="jdbc:mysql://localhost:3306/activemqdb?relaxAutoCommit=true"/>  
+      <property name="username" value="root"/>  
+      <property name="password" value="root"/>  
+      <property name="poolPreparedStatements" value="true"/>  
+    </bean>  
+```
+
+​	配置后，在数据库新建对应数据库。
+
+​	在activemq的bin目录中加入相应jar包：`commons-dbcp-1.2.2`,`commons-pool-1.6`,`mysql-connector-java-5.1.6`
+
+**启动：**
+
+​	默认创建三个表，当producer发送消息后，会存储到msg的表中，当consumer处理消息后，msg中的对应消息会被清除
+
+![](img/activemqdb.png)
+
+**表结构：**
+
+> - **activemq_acks：**用于存储订阅关系。如果是持久化Topic，订阅者和服务器的订阅关系在这个表保存，主要数据库字段如下：
+>
+>   > container：消息的destination
+>
+>   > sub_dest：如果是使用static集群，这个字段会有集群其他系统的信息
+>
+>   > client_id：每个订阅者都必须有一个唯一的客户端id用以区分
+>
+>   > sub_name：订阅者名称
+>
+>   > selector：选择器，可以选择只消费满足条件的消息。条件可以用自定义属性实现，可支持多属性and和or操作
+>
+>   > last_acked_id：记录消费过的消息的id
+>
+>   > activemq_lock：在集群环境中才有用，只有一个Broker可以获得消息，称为Master Broker，其他的只能作为备份等待Master Broker不可用，才可能成为下一个Master Broker。这个表用于记录哪个Broker是当前的Master Broker。
+>
+> - **activemq_msgs：**用于存储消息，Queue和Topic都存储在这个表中。主要的数据库字段如下：
+>
+>   > id：自增的数据库主键
+>
+>   > container：消息的destination
+>
+>   > msgid_prod：消息发送者客户端的主键
+>
+>   > msg_seq：是发送消息的顺序，msgid_prod+msg_seq可以组成jms的messageid
+>
+>   > expiration：消息的过期时间，存储的是从1970-01-01到现在的毫秒数
+>
+>   > msg：消息本体的java序列化对象的二进制数据
+>
+>   > priority：优先级，从0-9，数值越大优先级越高
+>
+> - **activemq_acks**用于存储订阅关系。如果是持久化topic，订阅者和服务器的订阅关系在这个表保存。
+
 ### LevelDB方式
 
 ​	从ActiveMQ 5.6版本之后，又推出了LevelDB的持久化引擎。
