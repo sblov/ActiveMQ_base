@@ -707,8 +707,127 @@ factory = new ActiveMQConnectionFactory("admin", "admin", "tcp://localhost:61616
 
 ### Producer API
 
+#### 发送消息
+
+MessageProducer.class
+
+```java
+/*
+	 * @param destination
+	 *            the destination to send this message to
+	 * @param message
+	 *            the message to send
+	 * @param deliveryMode
+	 *            the delivery mode to use
+	 *			DeliveryMode.NON_PERSISTENT|DeliveryMode.PERSISTENT
+	 * @param priority
+	 *            the priority for this message
+	 * @param timeToLive
+	 *            the message's lifetime (in milliseconds)
+*/
+void send(Message message)
+void send(Destination destination, Message message)  
+void send(Message message, int deliveryMode, int priority, long timeToLive)
+void send(Destination destination, Message message, int deliveryMode, int priority, long timeToLive)
+```
+
+#### 消息有效期
+
+​	消息过期后，默认会将失效消息保存到“死信队列（ActiveMQ.DLQ）”。
+
+​	不持久化的消息，在超时后直接丢弃，不会保存到死信队列中。
+
+​	死信队列名称可配置，死信队列中的消息不能恢复。
+
+​	可在activemq.xml中配置
+
+设置DeliveryMode.PERSISTENT：
+
+>未超时：
+>
+>![](E:/Git_REP/activemq/img/bt.png)
+>
+>超时后：进入dlq
+>
+>![](E:/Git_REP/activemq/img/at.png)
+>
+>mq：
+>
+>![](E:/Git_REP/activemq/img/dlq.png)
+
+设置DeliveryMode.NON_PERSISTENT：
+
+> 超时后直接被丢弃：
+>
+> ![](img/dlq2.png)
+
+#### 消息优先级
+
+```java
+session = connection.createSession(true, Session.CLIENT_ACKNOWLEDGE);//开启事务，保证一次性提交
+............
+producer.send(session.createObjectMessage("2"), DeliveryMode.NON_PERSISTENT, 2,0);
+producer.send(session.createObjectMessage("9"), DeliveryMode.NON_PERSISTENT, 9,0);
+producer.send(session.createObjectMessage("5"), DeliveryMode.NON_PERSISTENT, 5,0);
+producer.send(session.createObjectMessage("7"), DeliveryMode.NON_PERSISTENT, 7,0);
+			
+session.commit();//提交，一次性send
+```
+
+​	可以在发送消息时，指定消息的权重，**broker可以建议权重较高的消息将会优先发送给Consumer**。在某些场景下，我们通常希望权重较高的消息优先传送；不过因为各种原因，priority并不能决定消息传送的严格顺序(order)（==priority只保证从mq中传递给consumer的顺序，具体的消息执行时间，会导致消息的执行顺序得不到保证==）。
+
+​    JMS标准中约定priority可以为0\~9的数值，值越大表示权重越高，默认值为4。不过activeMQ中各个存储器对priority的支持并非完全一样。比如JDBC存储器可以支持0~9，因为JDBsC存储器可以基于priority对消息进行排序和索引化；但是对于kahadb/levelDB等这种基于日志文件的存储器而言，priority支持相对较弱，只能识别三种优先级(LOW: < 4,NORMAL: =4,HIGH: > 4)。在broker端，默认是不支持priority排序的，需要手动开启:
+
+**1.`<policyEntry queue=">" prioritizedMessages="true"/>  `**
+
+> ​	一旦开启了此属性，此后消息存储时，将会按照prioprity的倒序索引化消息(比如kahadb B+Tree，此后priority将作为索引的一部分)。此后broker从存储器中获取消息时，权重较高的消息将会被优先获取；对于JDBC等其他存储器，可能在获取消息时，按照priority作为排序列来筛选消息。
+>
+> ​    	我们首先简单的描述一下，消息在broker端pending的过程，这涉及到prefetch机制以及消息是否持久化等方面的问题。在broker端，为了优化Consumer消费的效率，通常开启prefetch策略，即从通道中(Queue/Topic)批量加载多条消息，这些消息可能来自内存(非持久化)，也可能来自存储文件(持久化消息，或者非持久化消息被swap到临时文件中)；borker会为每个Consumer创建一个基于内存的pending buffer，用来保存即将发送给Consumer的消息列表。当buffer中的消息被Consumer消费之后，将会从内存或者文件中继续加载多条消息，然后再根据需要将一定量的消息放入到pending buffer中。由此可见，我们只能保证每次prefetch的消息列表是按照priority排序的，但是有可能在buffer中的消息还没有发送之前，会有更高优先级的消息被写入文件或内存，事实上这已经不能改变消息发送的顺序了；因为我们无法在全局范围内，保证Consumer即将消费的消息是权重最高的！！
+>
+> ​    	不过对于“非持久化”类型的消息(如果没有被swap到临时文件)，它们被保存在内存中，它们不存在从文件Paged in到内存的过程，因为可以保证优先级较高的消息，总是在prefetch的时候被优先获取，这也是“非持久化”消息可以担保消息发送顺序的优点。
+>
+> ​    	Broker在收到Producer的消息之后，将会把消息cache到内存，如果消息需要持久化，那么同时也会把消息写入文件；如果通道中Consumer的消费速度足够快(即积压的消息很少，尚未超过内存限制，我们通过上文能够知道，每个通道都可以有一定的内存用来cache消息)，那么消息几乎不需要从存储文件中Paged In，直接就能从内存的cache中获取即可，这种情况下，priority可以担保“全局顺序”；不过，如果消费者滞后太多，cache已满，就会触发新接收的消息直接保存在磁盘中，那么此时，priority就没有那么有效了。
+>
+> ​    	在Queue中，prefetch的消息列表默认将会采用“轮询”的方式(**roundRobin，注意并不是roundRobinDispatch**)[备注：因为Queue不支持任何DispatchPolicy]，依次添加到每个consumer的pending buffer中，比如有m1-m2-m3-m4四条消息，有C1-C2两个消费者，那么: m1->C1,m2->C2,m3->C1,m4->C2。这种轮序方式，会对基于权重的消息发送有些额外的影响，假如四条消息的权重都不同，但是(m1,m3)->C1，事实上m2的权重>m3,对于C1而言，它似乎丢失了“顺序性”。
+
+**2.`<policyEntry queue=">" strictOrderDispatch="true" />  `强顺序**
+
+>   	**strictOrderDispatch**“严格顺序转发”，这是区别于“轮询”的一种消息转发手段；不过不要误解它为“全局严格顺序”，它只不过是将prefetch的消息依次填满每个consumer的pending buffer。比如上述例子中，如果C1-C2两个消费者的buffer尺寸为3，那么(m1,m2,m3)->C1,(m4)->C2;当C1填充完毕之后，才会填充C2。由此这种策略可以保证buffer中所有的消息都是“权重临近的”、有序的。(需要注意：strictOrderDispatch并非是解决priority消息顺序的问题而生，只是在使用priority时需要关注它)。
+>
+> ​    	对于Queue而言，仅仅使用strictOrderDispatch并不能完全解决顺序问题，它可能是相对高效但是比较粗略的方式
+
+**3.`<policyEntry queue=">" prioritizedMessages="true" useCache="false" expireMessagesPeriod="0" queuePrefetch="1" />  `严格顺序**
+
+> ​	useCache=false来关闭内存，强制将所有的消息都立即写入文件(索引化，但是会降低消息的转发效率)；queuePrefetch=1来约束每个consumer任何时刻只有一个消息正在处理，那些消息消费之后，将会从文件中重新获取，这大大增加了消息文件操作的次数，不过每次读取肯定都是priority最高的消息。[对于broker而言，如果指定了prioritizedMessage将在存储时就根据消息的权重建立索引顺序，在内存中使用PrioritizedPendingList保存消息；否则将使用OrderedPendingList]
+>
+>  	“strictOrderDispatch”也适用于Topic，broker可以保证所有Subscriber获得的消息的顺序是一致的。不过Topic支持DispatchPolicy，但是不支持"strictOrderDispatch"属性，这个与Queue有所不同。
+
 ### Consumer API
 
+#### 消息的确认
+
+​	Consumer获取消息后，如果没有做确认acknowledge，此消息不会从MQ中删除。
+
+​	消息如果拉取到consumer后，未确认，那么消息被锁定。如果consumer关闭时仍然没有确认消息，则释放消息锁定信息。消息将发送给其他consumer处理
+
+​	消息一旦处理，应该立即确认。类似数据库中的事务管理机制
+
+#### 消息的过滤
+
+​	对消息消费者处理的消息数据进行过滤。这种处理可以明确消费者的角色，细分消费者的功能
+
+**设置过滤**
+
+```java
+session.createConsumer(Destination destination,String messageSelector);
+```
+
+​	过滤信息为字符串，语法类似sql92的where字句条件信息。可以使用如and、or、in、not in等关键字
+
+​	消息的生产者在发送消息时，必须设置可以过滤的属性信息，所有的属性信息设置方法格式为：setXxxProperty(String name,T value)。
+
 ## 八、SpringActiveMQ
+
+​	./spring-activemq
 
 ## 九、集群
